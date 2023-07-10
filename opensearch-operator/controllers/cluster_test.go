@@ -348,6 +348,13 @@ var _ = Describe("Cluster Reconciler", func() {
 		})
 	})
 
+	/// ------- Tests autoscaler scaling -------
+	When("Autoscaler scaleUp decision is true", func() {
+		It("should add a node to the existing statefulset nodePool replicas", func() {
+
+		})
+	})
+
 	/// ------- Tests nodepool cleanup -------
 	When("Updating an OpensearchCluster kind instance", func() {
 		It("should remove old node pools", func() {

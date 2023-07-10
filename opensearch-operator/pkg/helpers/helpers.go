@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/prometheus/client_golang/api"
-	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
-	"github.com/prometheus/common/model"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"reflect"
@@ -374,13 +371,14 @@ func EvalScalingTime(component string, instance *opsterv1.OpenSearchCluster) (bo
 	return false, nil
 }
 
-func EvalScalingRules(nodePool *opsterv1.NodePool, autoscalerPolicy *opsterv1.Autoscaler, instance *opsterv1.OpenSearchCluster) (int32, error) {
-	apiClient, err := NewPrometheusClient(instance.Spec.General.AutoScaler.PrometheusEndpoint)
-	if err != nil {
-		return 0, fmt.Errorf("Unable to create Prometheus client: %v", err)
-	}
+func EvalScalingRules(nodePool *opsterv1.NodePool, autoscaler *opsterv1.Autoscaler, instance *opsterv1.OpenSearchCluster) (int32, error) {
+	//apiClient, err := NewPrometheusClient(instance.Spec.General.AutoScaler.PrometheusEndpoint)
+	//if err != nil {
+	//	return 0, fmt.Errorf("Unable to create Prometheus client: %v", err)
+	//}
+
 	scaleCount := int32(0)
-	for r, rule := range autoscalerPolicy.Spec.Rules {
+	for r, rule := range autoscaler.Spec.Rules {
 		//if the rule and nodetype do not match, break to the next ruleEval
 		if !ContainsString(nodePool.Roles, rule.NodeRole) {
 			break
@@ -392,67 +390,87 @@ func EvalScalingRules(nodePool *opsterv1.NodePool, autoscalerPolicy *opsterv1.Au
 		//if the ruleSet ever evaluates to false the scaling decision will not occur
 		ruleEval := false
 		//iterate through items for the relevant nodeRole type
-	itemLoop:
 		for _, item := range rule.Items {
 
-			query := item.Metric
-			nodeMatcher := "node=~\"" + instance.Name + "-" + nodePool.Component + "-[0-9]+$\""
-			//build nodeMatcher string
-			if item.QueryOptions.LabelMatchers != nil {
-				for i, labelMatcher := range item.QueryOptions.LabelMatchers {
-					if i == 0 {
-						query = query + "{"
-					}
-					query = query + labelMatcher
-				}
-				query = query + "," + nodeMatcher + "}"
-			} else {
-				query = query + "{" + nodeMatcher + "}"
-			}
-			//add time interval if exists; a function wrapper must exist
-			if &item.QueryOptions.Interval != nil && &item.QueryOptions.Function != nil {
-				query = query + "[" + item.QueryOptions.Interval + "]"
-			} else {
-				return 0, fmt.Errorf("A function wrapper is required when using intervals for Prometheus query. ")
-			}
-			//add func wrapper if exists
-			if &item.QueryOptions.Function != nil {
-				query = item.QueryOptions.Function + "(" + query + ")"
-			}
-			if item.QueryOptions.AggregateEvaluation {
-				query = "avg(" + query + ")"
-			}
-			//do boolean threshold comparison
-			query = query + " " + item.Operator + "bool " + item.Threshold
-
-			result, warnings, err := apiClient.Query(context.Background(), query, time.Now())
-			if err != nil { //if the query fails we will not make a scaling decision
-				return 0, fmt.Errorf("Prometheus query [ %q ] failed with error: %v ", query, err)
-			}
-			if len(warnings) > 0 { //if there are warnings we will not make a scaling decision
-				return 0, fmt.Errorf("Warnings received: %v", err)
+			//query := item.Metric
+			//nodeMatcher := "node=~\"" + instance.Name + "-" + nodePool.Component + "-[0-9]+$\""
+			////build nodeMatcher string
+			//if item.QueryOptions.LabelMatchers != nil {
+			//	for i, labelMatcher := range item.QueryOptions.LabelMatchers {
+			//		if i == 0 {
+			//			query = query + "{"
+			//		}
+			//		query = query + labelMatcher
+			//	}
+			//	query = query + "," + nodeMatcher + "}"
+			//} else {
+			//	query = query + "{" + nodeMatcher + "}"
+			//}
+			////add time interval if exists; a function wrapper must exist
+			//if &item.QueryOptions.Interval != nil && &item.QueryOptions.Function != nil {
+			//	query = query + "[" + item.QueryOptions.Interval + "]"
+			//} else {
+			//	return 0, fmt.Errorf("A function wrapper is required when using intervals for Prometheus query. ")
+			//}
+			////add func wrapper if exists
+			//if &item.QueryOptions.Function != nil {
+			//	query = item.QueryOptions.Function + "(" + query + ")"
+			//}
+			//if item.QueryOptions.AggregateEvaluation {
+			//	query = "avg(" + query + ")"
+			//}
+			////do boolean threshold comparison
+			//query = query + " " + item.Operator + "bool " + item.Threshold
+			//build the query for the item
+			query, err := autoscaler.BuildQuery(context.Background(), item, instance, nodePool)
+			if err != nil {
+				return 0, fmt.Errorf("error building query for autoscalerpolicy item: %v", err)
 			}
 
-			// Check the result type and iterate over the data
-			if result.Type() != model.ValVector {
-				return 0, fmt.Errorf("Prometheus result type not a Vector: %v", err)
-			} else {
-				//if all values a true set ruleEval, else break out of the itemloop and check the next rule
-				for _, vector := range result.(model.Vector) {
-					if vector.Value == 1 {
-						ruleEval = true
-					} else {
-						ruleEval = false
-						break itemLoop
-					}
-				}
+			ruleEval, err = autoscaler.Eval(context.Background(), instance.Spec.General.AutoScaler.PrometheusEndpoint, query)
+			if err != nil {
+				return 0, fmt.Errorf("error querying prometheus: %v", err)
 			}
+			if !ruleEval {
+				break
+			}
+			//
+			//result, warnings, err := apiClient.Query(context.Background(), query, time.Now())
+			//if err != nil { //if the query fails we will not make a scaling decision
+			//	return 0, fmt.Errorf("Prometheus query [ %q ] failed with error: %v ", query, err)
+			//}
+			//if len(warnings) > 0 { //if there are warnings we will not make a scaling decision
+			//	return 0, fmt.Errorf("Warnings received: %v", err)
+			//}
+			//
+			//// Check the result type and iterate over the data
+			//if result.Type() != model.ValVector {
+			//	return 0, fmt.Errorf("Prometheus result type not a Vector: %v", err)
+			//} else {
+			//	//if all values a true set ruleEval, else break out of the itemloop and check the next rule
+			//	for _, vector := range result.(model.Vector) {
+			//		if vector.Value == 1 {
+			//			ruleEval = true
+			//		} else {
+			//			ruleEval = false
+			//			break itemLoop
+			//		}
+			//	}
+			//}
+
+			//ruleEval, err = queryEvaluator.Eval(context.Background(), instance.Spec.General.AutoScaler.PrometheusEndpoint, query)
+			//if err != nil {
+			//	return 0, err
+			//}
+			//if !ruleEval {
+			//	break
+			//}
 		}
 		//if any ruleset evals to true, we are going to scale;
 		if ruleEval {
 			//if max replicas are set for both scalingActions then we know there is a problem with the config
 			if rule.Behavior.ScaleUp.MaxReplicas != 0 && rule.Behavior.ScaleDown.MaxReplicas != 0 {
-				return 0, fmt.Errorf("Both scaleUp and scaleDown logic enabled for rule[%v] in %v autoscaler policy. ", r, autoscalerPolicy.Name)
+				return 0, fmt.Errorf("Both scaleUp and scaleDown logic enabled for rule[%v] in %v autoscaler policy. ", r, autoscaler.Name)
 			}
 			//if the current replicas is less than the defined MaxReplicas, scale up
 			if instance.Status.Scaler[nodePool.Component].Replicas < rule.Behavior.ScaleUp.MaxReplicas {
@@ -467,14 +485,54 @@ func EvalScalingRules(nodePool *opsterv1.NodePool, autoscalerPolicy *opsterv1.Au
 	return scaleCount, nil
 }
 
-func NewPrometheusClient(prometheusEndpoint string) (v1.API, error) {
-	client, err := api.NewClient(api.Config{
-		Address: prometheusEndpoint,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client")
-	}
+//func NewPrometheusClient(prometheusEndpoint string) (v1.API, error) {
+//	client, err := api.NewClient(api.Config{
+//		Address: prometheusEndpoint,
+//	})
+//	if err != nil {
+//		return nil, fmt.Errorf("failed to create client")
+//	}
+//
+//	v1api := v1.NewAPI(client)
+//	return v1api, nil
+//}
 
-	v1api := v1.NewAPI(client)
-	return v1api, nil
-}
+// refactoring scratchpad
+
+//query, err := buildPrometheusQuery(item, instance.Name, nodePool.Component)
+//if err != nil {
+//return 0, err
+//}
+
+//func buildPrometheusQuery(item opsterv1.Item, instanceName string, nodeComponent string) (string, error) {
+//	query := item.Metric
+//	nodeMatcher := "node=~\"" + instanceName + "-" + nodeComponent + "-[0-9]+$\""
+//	//build nodeMatcher string
+//	if item.QueryOptions.LabelMatchers != nil {
+//		for i, labelMatcher := range item.QueryOptions.LabelMatchers {
+//			if i == 0 {
+//				query = query + "{"
+//			}
+//			query = query + labelMatcher
+//		}
+//		query = query + "," + nodeMatcher + "}"
+//	} else {
+//		query = query + "{" + nodeMatcher + "}"
+//	}
+//	//add time interval if exists; a function wrapper must exist
+//	if &item.QueryOptions.Interval != nil && &item.QueryOptions.Function != nil {
+//		query = query + "[" + item.QueryOptions.Interval + "]"
+//	} else {
+//		return "", fmt.Errorf("A function wrapper is required when using intervals for Prometheus query. ")
+//	}
+//	//add func wrapper if exists
+//	if &item.QueryOptions.Function != nil {
+//		query = item.QueryOptions.Function + "(" + query + ")"
+//	}
+//	if item.QueryOptions.AggregateEvaluation {
+//		query = "avg(" + query + ")"
+//	}
+//	//do boolean threshold comparison
+//	query = query + " " + item.Operator + "bool " + item.Threshold
+//	return query, nil
+//}

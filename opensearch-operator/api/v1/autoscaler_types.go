@@ -17,7 +17,13 @@ limitations under the License.
 package v1
 
 import (
+	"context"
+	"fmt"
+	"github.com/prometheus/client_golang/api"
+	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
+	"github.com/prometheus/common/model"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"time"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -95,6 +101,87 @@ type AutoscalerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Autoscaler `json:"items"`
+}
+
+type AutoscalerController interface {
+	Eval(ctx context.Context, prometheusUrl string, query string) (bool, error)
+}
+
+func (a *Autoscaler) BuildQuery(ctx context.Context, item Item, instance *OpenSearchCluster, nodePool *NodePool) (string, error) {
+	query := item.Metric
+	nodeMatcher := "node=~\"" + instance.Name + "-" + nodePool.Component + "-[0-9]+$\""
+	//build nodeMatcher string
+	if item.QueryOptions.LabelMatchers != nil {
+		for i, labelMatcher := range item.QueryOptions.LabelMatchers {
+			if i == 0 {
+				query = query + "{"
+			}
+			query = query + labelMatcher
+		}
+		query = query + "," + nodeMatcher + "}"
+	} else {
+		query = query + "{" + nodeMatcher + "}"
+	}
+	//add time interval if exists; a function wrapper must exist
+	if &item.QueryOptions.Interval != nil && &item.QueryOptions.Function != nil {
+		query = query + "[" + item.QueryOptions.Interval + "]"
+	} else {
+		return "", fmt.Errorf("A function wrapper is required when using intervals for Prometheus query. ")
+	}
+	//add func wrapper if exists
+	if &item.QueryOptions.Function != nil {
+		query = item.QueryOptions.Function + "(" + query + ")"
+	}
+	if item.QueryOptions.AggregateEvaluation {
+		query = "avg(" + query + ")"
+	}
+	//do boolean threshold comparison
+	query = query + " " + item.Operator + "bool " + item.Threshold
+
+	return query, nil
+}
+
+func (a *Autoscaler) Eval(ctx context.Context, prometheusUrl string, query string) (bool, error) {
+	apiClient, err := NewPrometheusClient(prometheusUrl)
+	if err != nil {
+		return false, fmt.Errorf("unable to create Prometheus client: %v", err)
+	}
+
+	result, warnings, err := apiClient.Query(context.Background(), query, time.Now())
+	if err != nil { //if the query fails we will not make a scaling decision
+		return false, fmt.Errorf("Prometheus query [ %q ] failed with error: %v ", query, err)
+	}
+	if len(warnings) > 0 { //if there are warnings we will not make a scaling decision
+		return false, fmt.Errorf("warnings received: %v", err)
+	}
+
+	// Check the result type and iterate over the data
+	if result.Type() != model.ValVector {
+		return false, fmt.Errorf("prometheus result type not a Vector: %v", err)
+	} else {
+		//if all values a true set ruleEval, else break out of the itemloop and check the next rule
+		for _, vector := range result.(model.Vector) {
+			if vector.Value == 1 {
+				return true, nil
+			} else {
+				return false, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func NewPrometheusClient(prometheusEndpoint string) (v1.API, error) {
+	client, err := api.NewClient(api.Config{
+		Address: prometheusEndpoint,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client")
+	}
+
+	v1api := v1.NewAPI(client)
+	return v1api, nil
 }
 
 func init() {
