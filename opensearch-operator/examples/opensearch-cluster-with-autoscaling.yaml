@@ -11,7 +11,7 @@ spec:
     serviceName: my-cluster
     autoScaler:
       enable: true
-      prometheusEndpoint: 'http://10.42.0.146:9090'
+      prometheusEndpoint: 'http://localhost:9090'
       scaleTimeout: 1m
     monitoring:
      enable: true
